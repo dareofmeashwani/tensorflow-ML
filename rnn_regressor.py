@@ -1,15 +1,17 @@
 import numpy as np
 import tensorflow as tf
-class nn:
+class rnnr:
     __batch_size=None
     __datatype=tf.float32
     __epochs=10
     __hidden_layers=None
     __activation_choice=None
+    __lstm_unit_size=32
+    __lstm_units_count=1
     __learning_rate = 0.1
     __dropout_rate=.8
-    __n_classes=None
-    __feature_size=None
+    __sequence_length=None
+    __sequence_dimensions = 10
     __working_dir='./'
     __model_saving=False
     __model_restore=False
@@ -27,14 +29,16 @@ class nn:
     def set_hidden_layers(self,list,activation_choice_list):
         self.__hidden_layers=list
         self.__activation_choice=activation_choice_list
+    def set_lstm_defination(self,size,count):
+        self.__lstm_unit_size=size
+        self.__lstm_units_count=count
     def set_learningrate(self,value):
         self.__learning_rate=value
     def set_dropout(self,value):
         self.__dropout_rate=value
-    def set_n_classes(self,classes):
-        self.__n_classes=classes
-    def set_feature_size(self,value):
-        self.__feature_size=value
+    def set_sequence_defination(self,length,dimension):
+        self.__sequence_length=length
+        self.__sequence_dimensions=dimension
     def set_save_summary_path(self,path):
         self.__working_dir=path
         print 'run this command on terminal'
@@ -111,14 +115,31 @@ class nn:
             tf.summary.scalar('max', tf.reduce_max(var))
             tf.summary.scalar('min', tf.reduce_min(var))
             tf.summary.histogram('histogram', var)
-    def __model_defination(self,x):
+    def __lstm(self,x):
+        with tf.name_scope('LSTM_Layer' ):
+            lstm_cells=[]
+            for i in range(self.__lstm_units_count):
+                lstm_cells.append(tf.contrib.rnn.BasicLSTMCell(self.__lstm_unit_size, forget_bias=1.0, state_is_tuple=True))
+            stacked_lstm = tf.contrib.rnn.MultiRNNCell(lstm_cells)
+            value, state = tf.nn.dynamic_rnn(stacked_lstm,x, dtype=tf.float32)
+            value = tf.transpose(value, [1, 0, 2])
+            self.__variable_summaries(value, "LSTM_output")
+            #last = tf.gather(value, int(value.get_shape()[0]) - 1)
+            last=value[-1]
+            self.__variable_summaries(last, "LSTM_Last")
+        return last
+    def __fc(self,x):
         hidden_layer_weights_biases = {}
         layer_output = {}
-        for i in range(len(self.__hidden_layers)):
+        try:
+            no_of_layers=len(self.__hidden_layers)
+        except:
+            no_of_layers=0
+        for i in range(no_of_layers):
             with tf.name_scope('Hidden_Layer_'+str(i+1)):
                 if i == 0:
                     hidden_layer_weights_biases.update(
-                        {'weights' + str(i): tf.Variable(tf.truncated_normal([self.__feature_size, self.__hidden_layers[i]]),name='weight'),
+                        {'weights' + str(i): tf.Variable(tf.truncated_normal([self.__lstm_unit_size, self.__hidden_layers[i]]),name='weight'),
                          'biases' + str(i): tf.Variable(tf.truncated_normal([1, self.__hidden_layers[i]]),name='biases')})
                     self.__variable_summaries(hidden_layer_weights_biases['weights' + str(i)],"weights")
                     self.__variable_summaries(hidden_layer_weights_biases['biases' + str(i)],"biases")
@@ -145,46 +166,49 @@ class nn:
                     self.__variable_summaries(act, self.get_activation_function_name(self.__activation_choice[i]))
 
         with tf.name_scope('Output_Layer'):
-            output_layer = {'weights': tf.Variable(tf.random_normal([self.__hidden_layers[len(self.__hidden_layers) - 1], self.__n_classes]),name='weight'),
-                        'biases': tf.Variable(tf.random_normal([1, self.__n_classes]),name='biases') }
-            self.__variable_summaries( output_layer['weights'],"weights")
-            self.__variable_summaries(output_layer['biases'],"biases" )
-            mul=tf.matmul(layer_output[str(len(self.__hidden_layers) - 1)], output_layer['weights'])
+            if self.__hidden_layers is not None and no_of_layers!=0:
+                output_layer = {'weights': tf.Variable(tf.random_normal([self.__hidden_layers[len(self.__hidden_layers) - 1],1]),name='weight'),
+                                'biases': tf.Variable(tf.random_normal([1]), name='biases')}
+                self.__variable_summaries(output_layer['weights'], "weights")
+                self.__variable_summaries(output_layer['biases'], "biases")
+                mul=tf.matmul(layer_output[str(len(self.__hidden_layers) - 1)], output_layer['weights'])
+            else:
+                output_layer = {'weights': tf.Variable(tf.random_normal([self.__lstm_unit_size,1]),name='weight'),
+                                'biases': tf.Variable(tf.random_normal([1]), name='biases')}
+                self.__variable_summaries(output_layer['weights'], "weights")
+                self.__variable_summaries(output_layer['biases'], "biases")
+                mul = tf.matmul(x, output_layer['weights'])
             logits= tf.add(mul,output_layer['biases'],name="logits")
             self.__variable_summaries(mul, "Multiply")
             self.__variable_summaries(logits, "logits")
         return logits
     def pretrained_test(self,data):
         tf.reset_default_graph()
-        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__feature_size],name="input")
-        y = tf.placeholder(dtype=self.__datatype, shape=[None, self.__n_classes],name="labels")
-        logits = self.__model_defination(x)
+        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__sequence_length,self.__sequence_dimensions],name="input")
+        y = tf.placeholder(dtype=self.__datatype, shape=[None],name="labels")
+        logits = self.__fc(self.__lstm(x))
 
-        with tf.name_scope('Accuracy'):
-            #cross_entropy = tf.reduce_mean(tf.square(tf.subtract(hypothesis,y)),name='Cross_entropy')
-            cross_entropy=tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits,labels=y,name='Cross_entropy'))
-            hypothesis = tf.nn.softmax(logits, name="softmax")
-            prediction=tf.argmax(hypothesis, 1,name='Prediction')
-            correct_prediction = tf.equal(prediction, tf.argmax(y, 1),name='Correct_prediction')
-            accuracy=tf.reduce_mean(tf.cast(correct_prediction, tf.float32),name='Accuracy')
+        with tf.name_scope('Total'):
+            cross_entropy = tf.reduce_mean(tf.square(tf.subtract(logits, y)), name='Cross_entropy')
+            #cross_entropy = tf.reduce_mean(tf.abs(tf.subtract(logits, y)), name='Cross_entropy')
+            # cross_entropy=tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits,labels=y,name='Cross_entropy'))
             tf.summary.scalar("Cross_Entropy", cross_entropy)
-            tf.summary.scalar("Accuracy", accuracy)
 
         with tf.name_scope('Optimizer'):
             learningRate = tf.train.exponential_decay(learning_rate=self.__learning_rate,global_step=1,
                                                   decay_steps=self.__shape[0],decay_rate=0.97,staircase=True,name='Learning_Rate')
-            #optimizer = tf.train.GradientDescentOptimizer(self.__learning_rate).minimize(cross_entropy)
+            #optimizer = tf.train.GradientDescentOptimizer(learningRate).minimize(cross_entropy)
             optimizer = tf.train.AdamOptimizer(learningRate).minimize(cross_entropy)
 
         session = tf.InteractiveSession()
         saver = tf.train.Saver()
-        saver.restore(session, tf.train.latest_checkpoint(self.__working_dir+'/model/'))
+        saver.restore(session, tf.train.latest_checkpoint(self.__working_dir + "/model/"))
         merged = tf.summary.merge_all()
         if data.has_key('test_x') and data['test_x'].shape[0] > 0:
             i = 0
             iteration = 0
-            acc = 0
-            test_prediction=[]
+            epoch_loss = 0
+            test_prediction = []
             while i < len(data['test_x']):
                 start = i
                 end = i + self.__batch_size
@@ -192,39 +216,35 @@ class nn:
                 batch_x = data['test_x'][start:end]
                 if data.has_key('test_y') and data['test_y'].shape[0] > 0:
                     batch_y = data['test_y'][start:end]
-                    pred,batch_acc = session.run([prediction,accuracy], feed_dict={x: batch_x, y: batch_y})
-                    acc += batch_acc
+                    pred, loss = session.run([logits, cross_entropy], feed_dict={x: batch_x, y: batch_y})
+                    epoch_loss += loss
                 else:
-                    pred= session.run([prediction], feed_dict={x: batch_x})
+                    pred = session.run([logits], feed_dict={x: batch_x})
                 iteration += 1
                 i += self.__batch_size
-                test_prediction+=list(pred)
+                test_prediction += list(pred)
             if data.has_key('test_y') and data['test_y'].shape[0] > 0:
-                return np.reshape(np.array(test_prediction),[-1]), acc/iteration
+                return np.reshape(np.array(test_prediction), [-1]), epoch_loss
             else:
                 return np.reshape(np.array(test_prediction), [-1])
     def train(self,data):
         if self.__batch_size == None: self.__batch_size = data['train_x'].shape[0]
         tf.reset_default_graph()
 
-        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__feature_size],name="input")
-        y = tf.placeholder(dtype=self.__datatype, shape=[None, self.__n_classes],name="labels")
-        logits = self.__model_defination(x)
+        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__sequence_length,self.__sequence_dimensions],name="input")
+        y = tf.placeholder(dtype=self.__datatype, shape=[None],name="labels")
+        logits = self.__fc(self.__lstm(x))
 
-        with tf.name_scope('Accuracy'):
-            #cross_entropy = tf.reduce_mean(tf.square(tf.subtract(hypothesis,y)),name='Cross_entropy')
-            cross_entropy=tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits,labels=y,name='Cross_entropy'))
-            hypothesis = tf.nn.softmax(logits, name="softmax")
-            prediction=tf.argmax(hypothesis, 1,name='Prediction')
-            correct_prediction = tf.equal(prediction, tf.argmax(y, 1),name='Correct_prediction')
-            accuracy=tf.reduce_mean(tf.cast(correct_prediction, tf.float32),name='Accuracy')
+        with tf.name_scope('Total'):
+            cross_entropy = tf.reduce_mean(tf.square(tf.subtract(logits, y)), name='Cross_entropy')
+            #cross_entropy = tf.reduce_mean(tf.abs(tf.subtract(logits, y)), name='Cross_entropy')
+            # cross_entropy=tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits,labels=y,name='Cross_entropy'))
             tf.summary.scalar("Cross_Entropy", cross_entropy)
-            tf.summary.scalar("Accuracy", accuracy)
 
         with tf.name_scope('Optimizer'):
             learningRate = tf.train.exponential_decay(learning_rate=self.__learning_rate,global_step=1,
                                                   decay_steps=self.__shape[0],decay_rate=0.97,staircase=True,name='Learning_Rate')
-            #optimizer = tf.train.GradientDescentOptimizer(self.__learning_rate).minimize(cross_entropy)
+            #optimizer = tf.train.GradientDescentOptimizer(learningRate).minimize(cross_entropy)
             optimizer = tf.train.AdamOptimizer(learningRate).minimize(cross_entropy)
 
         init = tf.global_variables_initializer()
@@ -232,35 +252,33 @@ class nn:
         session.run(init)
         saver = tf.train.Saver()
         if self.__model_restore == True:
-            name=self.__look_for_last_checkpoint(self.__working_dir+"/model/")
+            name = self.__look_for_last_checkpoint(self.__working_dir + "/model/")
             if name is not None:
-                saver.restore(session,self.__working_dir+"/model/"+name)
+                saver.restore(session, self.__working_dir + "/model/" + name)
         merged = tf.summary.merge_all()
-        train_writer = tf.summary.FileWriter(self.__working_dir + '/train',session.graph)
+        train_writer = tf.summary.FileWriter(self.__working_dir + '/train', session.graph)
         test_writer = tf.summary.FileWriter(self.__working_dir + '/test')
-        test_result =[]
-        train_result =[]
+        test_result = []
+        train_result = []
         for epoch in range(self.__epochs):
             epoch_loss = 0
-            acc=0
             i = 0
-            iteration=0
+            iteration = 0
             while i < len(data['train_x']):
                 start = i
                 end = i + self.__batch_size
                 if (end > len(data['train_x'])): end = len(data['train_x'])
                 batch_x = data['train_x'][start:end]
                 batch_y = data['train_y'][start:end]
-                summary ,_,loss , batch_acc= session.run([merged,optimizer, cross_entropy,accuracy], feed_dict={x: batch_x, y: batch_y})
+                summary, _, loss = session.run([merged, optimizer, cross_entropy],
+                                                    feed_dict={x: batch_x, y: batch_y})
                 epoch_loss += loss
-                acc+=batch_acc
-                iteration+=1
+                iteration += 1
                 i += self.__batch_size
             train_writer.add_summary(summary, epoch)
-            train_result.append([epoch,epoch_loss,acc/iteration])
-            if data.has_key('test_x') and data['test_x'].shape[0]>0:
+            train_result.append([epoch, epoch_loss])
+            if data.has_key('test_x') and data['test_x'].shape[0] > 0:
                 epoch_loss = 0
-                acc = 0
                 i = 0
                 iteration = 0
                 while i < len(data['test_x']):
@@ -269,38 +287,38 @@ class nn:
                     if (end > len(data['test_x'])): end = len(data['test_x'])
                     batch_x = data['test_x'][start:end]
                     batch_y = data['test_y'][start:end]
-                    summary,loss,batch_acc = session.run([merged,cross_entropy,accuracy],feed_dict={x: batch_x, y: batch_y})
+                    summary, loss = session.run([merged, cross_entropy],
+                                                     feed_dict={x: batch_x, y: batch_y})
                     epoch_loss += loss
-                    acc += batch_acc
                     iteration += 1
                     i += self.__batch_size
                 test_writer.add_summary(summary, epoch)
-                test_result.append([epoch, epoch_loss, acc/iteration])
-                print "Training:",train_result[len(train_result)-1],"Test:",test_result[len(test_result)-1]
+                test_result.append([epoch, epoch_loss])
+                print "Training:", train_result[len(train_result) - 1], "Test:", test_result[len(test_result) - 1]
             else:
                 print "Training :", train_result[len(train_result) - 1]
 
             if self.__model_saving == True:
-                save_path = saver.save(session, self.__working_dir + "/model/" + 'nn_model%d.ckpt' % epoch)
-                #print("Model saved in file: %s" % save_path)
+                save_path = saver.save(session, self.__working_dir + "/model/" + 'nnr_model%d.ckpt' % epoch)
+                # print("Model saved in file: %s" % save_path)
         print 'Training Succesfully Complete'
         if data.has_key('test_x') and data['test_x'].shape[0] > 0:
             i = 0
+            epoch_loss = 0
             iteration = 0
-            acc = 0
-            test_prediction=[]
+            test_prediction = []
             while i < len(data['test_x']):
                 start = i
                 end = i + self.__batch_size
                 if (end > len(data['test_x'])): end = len(data['test_x'])
                 batch_x = data['test_x'][start:end]
                 batch_y = data['test_y'][start:end]
-                pred,batch_acc = session.run([prediction,accuracy], feed_dict={x: batch_x, y: batch_y})
-                acc += batch_acc
+                pred, loss= session.run([logits, cross_entropy], feed_dict={x: batch_x, y: batch_y})
+                epoch_loss += loss
                 iteration += 1
                 i += self.__batch_size
-                test_prediction+=list(pred)
-            self.test_prediction =np.reshape(np.array(test_prediction),[-1])
-            self.test_accuracy=acc/iteration
+                test_prediction += list(pred)
+            self.test_prediction = np.reshape(np.array(test_prediction), [-1])
+            self.test_loss = epoch_loss
         self.training_loss_history = train_result
         self.test_loss_history =test_result

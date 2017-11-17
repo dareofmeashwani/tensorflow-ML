@@ -1,15 +1,18 @@
 import numpy as np
 import tensorflow as tf
-class nn:
+class rnn:
     __batch_size=None
     __datatype=tf.float32
     __epochs=10
     __hidden_layers=None
     __activation_choice=None
+    __lstm_unit_size=32
+    __lstm_units_count=1
     __learning_rate = 0.1
     __dropout_rate=.8
+    __sequence_length=None
+    __sequence_dimensions = 300
     __n_classes=None
-    __feature_size=None
     __working_dir='./'
     __model_saving=False
     __model_restore=False
@@ -27,14 +30,18 @@ class nn:
     def set_hidden_layers(self,list,activation_choice_list):
         self.__hidden_layers=list
         self.__activation_choice=activation_choice_list
+    def set_lstm_defination(self,size,count):
+        self.__lstm_unit_size=size
+        self.__lstm_units_count=count
     def set_learningrate(self,value):
         self.__learning_rate=value
     def set_dropout(self,value):
         self.__dropout_rate=value
-    def set_n_classes(self,classes):
-        self.__n_classes=classes
-    def set_feature_size(self,value):
-        self.__feature_size=value
+    def set_sequence_defination(self,length,dimension):
+        self.__sequence_length=length
+        self.__sequence_dimensions=dimension
+    def set_n_classes(self,value):
+        self.__n_classes=value
     def set_save_summary_path(self,path):
         self.__working_dir=path
         print 'run this command on terminal'
@@ -111,14 +118,31 @@ class nn:
             tf.summary.scalar('max', tf.reduce_max(var))
             tf.summary.scalar('min', tf.reduce_min(var))
             tf.summary.histogram('histogram', var)
-    def __model_defination(self,x):
+    def __lstm(self,x):
+        with tf.name_scope('LSTM_Layer' ):
+            lstm_cells=[]
+            for i in range(self.__lstm_units_count):
+                lstm_cells.append(tf.contrib.rnn.BasicLSTMCell(self.__lstm_unit_size, forget_bias=1.0, state_is_tuple=True))
+            stacked_lstm = tf.contrib.rnn.MultiRNNCell(lstm_cells)
+            value, state = tf.nn.dynamic_rnn(stacked_lstm,x, dtype=tf.float32)
+            value = tf.transpose(value, [1, 0, 2])
+            self.__variable_summaries(value, "LSTM_output")
+            #last = tf.gather(value, int(value.get_shape()[0]) - 1)
+            last=value[-1]
+            self.__variable_summaries(last, "LSTM_Last")
+        return last
+    def __fc(self,x):
         hidden_layer_weights_biases = {}
         layer_output = {}
-        for i in range(len(self.__hidden_layers)):
+        try:
+            no_of_layers=len(self.__hidden_layers)
+        except:
+            no_of_layers=0
+        for i in range(no_of_layers):
             with tf.name_scope('Hidden_Layer_'+str(i+1)):
                 if i == 0:
                     hidden_layer_weights_biases.update(
-                        {'weights' + str(i): tf.Variable(tf.truncated_normal([self.__feature_size, self.__hidden_layers[i]]),name='weight'),
+                        {'weights' + str(i): tf.Variable(tf.truncated_normal([self.__lstm_unit_size, self.__hidden_layers[i]]),name='weight'),
                          'biases' + str(i): tf.Variable(tf.truncated_normal([1, self.__hidden_layers[i]]),name='biases')})
                     self.__variable_summaries(hidden_layer_weights_biases['weights' + str(i)],"weights")
                     self.__variable_summaries(hidden_layer_weights_biases['biases' + str(i)],"biases")
@@ -145,20 +169,27 @@ class nn:
                     self.__variable_summaries(act, self.get_activation_function_name(self.__activation_choice[i]))
 
         with tf.name_scope('Output_Layer'):
-            output_layer = {'weights': tf.Variable(tf.random_normal([self.__hidden_layers[len(self.__hidden_layers) - 1], self.__n_classes]),name='weight'),
-                        'biases': tf.Variable(tf.random_normal([1, self.__n_classes]),name='biases') }
-            self.__variable_summaries( output_layer['weights'],"weights")
-            self.__variable_summaries(output_layer['biases'],"biases" )
-            mul=tf.matmul(layer_output[str(len(self.__hidden_layers) - 1)], output_layer['weights'])
+            if self.__hidden_layers is not None and no_of_layers!=0:
+                output_layer = {'weights': tf.Variable(tf.random_normal([self.__hidden_layers[len(self.__hidden_layers) - 1], self.__n_classes]),name='weight'),
+                                'biases': tf.Variable(tf.random_normal([1, self.__n_classes]), name='biases')}
+                self.__variable_summaries(output_layer['weights'], "weights")
+                self.__variable_summaries(output_layer['biases'], "biases")
+                mul=tf.matmul(layer_output[str(len(self.__hidden_layers) - 1)], output_layer['weights'])
+            else:
+                output_layer = {'weights': tf.Variable(tf.random_normal([self.__lstm_unit_size, self.__n_classes]),name='weight'),
+                                'biases': tf.Variable(tf.random_normal([1, self.__n_classes]), name='biases')}
+                self.__variable_summaries(output_layer['weights'], "weights")
+                self.__variable_summaries(output_layer['biases'], "biases")
+                mul = tf.matmul(x, output_layer['weights'])
             logits= tf.add(mul,output_layer['biases'],name="logits")
             self.__variable_summaries(mul, "Multiply")
             self.__variable_summaries(logits, "logits")
         return logits
     def pretrained_test(self,data):
         tf.reset_default_graph()
-        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__feature_size],name="input")
+        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__sequence_length,self.__sequence_dimensions],name="input")
         y = tf.placeholder(dtype=self.__datatype, shape=[None, self.__n_classes],name="labels")
-        logits = self.__model_defination(x)
+        logits = self.__fc(self.__lstm(x))
 
         with tf.name_scope('Accuracy'):
             #cross_entropy = tf.reduce_mean(tf.square(tf.subtract(hypothesis,y)),name='Cross_entropy')
@@ -199,17 +230,17 @@ class nn:
                 iteration += 1
                 i += self.__batch_size
                 test_prediction+=list(pred)
-            if data.has_key('test_y') and data['test_y'].shape[0] > 0:
-                return np.reshape(np.array(test_prediction),[-1]), acc/iteration
-            else:
-                return np.reshape(np.array(test_prediction), [-1])
+        if data.has_key('test_y') and data['test_y'].shape[0] > 0:
+            return np.reshape(np.array(test_prediction), [-1]), acc / iteration
+        else:
+            return np.reshape(np.array(test_prediction), [-1])
     def train(self,data):
         if self.__batch_size == None: self.__batch_size = data['train_x'].shape[0]
         tf.reset_default_graph()
 
-        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__feature_size],name="input")
+        x = tf.placeholder(dtype=self.__datatype, shape=[None, self.__sequence_length,self.__sequence_dimensions],name="input")
         y = tf.placeholder(dtype=self.__datatype, shape=[None, self.__n_classes],name="labels")
-        logits = self.__model_defination(x)
+        logits = self.__fc(self.__lstm(x))
 
         with tf.name_scope('Accuracy'):
             #cross_entropy = tf.reduce_mean(tf.square(tf.subtract(hypothesis,y)),name='Cross_entropy')
