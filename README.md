@@ -17,3 +17,7 @@ Auto-Encoders - Neural network based
 
 Auto-Encoders - Cnn based(under implemenation)
 
+Convolutional Neural network (lenet , Alexnet, VGG16, VGG19, Resnet, Densenet, Google-Inception-v2) 
+
+imgae_ops.py contains a bunch image related operation  using numpy, opencv, Pillow library
+
