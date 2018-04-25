@@ -1,11 +1,11 @@
 import tensorflow as tf
 import numpy as np
 import random
-import ops
+import ops,distance_metric
 import heapq
 lower = str.lower
 class model:
-    no_of_features=None
+    no_of_features = None
     learning_rate = 0.001
     model_restore = False
     working_dir = None
@@ -13,16 +13,18 @@ class model:
     epochs = 10
     test_result = []
     train_result = []
-
-    activation_list=[]
-    hidden_layers=[]
+    encoder_activation_list=[]
+    encoder_hidden_layers=[]
+    decoder_activation_list=[]
+    decoder_hidden_layers=[]
 
     dropout_rate=0.5
 
     loss_type = 'mse'
     regularization_type = None
     regularization_coefficient = 0.0001
-    logits=None
+    encoder_op=None
+    decoder_op=None
     optimizer=None
 
     def __init__(self):
@@ -31,23 +33,31 @@ class model:
     def setup(self):
         tf.reset_default_graph()
         self.x = tf.placeholder(dtype=tf.float32,
-                                shape=[None,self.no_of_features],
+                                shape=[None, self.no_of_features],
                                 name="input")
-        self.y = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="labels")
         self.lr = tf.placeholder("float", shape=[])
         self.is_train = tf.placeholder(tf.bool, shape=[])
 
-        if self.logits==None:
-            self.logits=self.get_model(self.x,self.is_train)
+        if self.encoder_op==None:
+            self.encoder_op=self.get_encoder(self.x,self.is_train)
         else:
-            self.logits=self.logits(self.x,self.is_train)
+            self.encoder_op=self.encoder_op(self.x,self.is_train)
+
+        if self.decoder_op==None:
+            self.decoder_op=self.get_decoder(self.x,self.is_train)
+        else:
+            self.decoder_op=self.decoder_op(self.x,self.is_train)
+
         with tf.name_scope('Output'):
-            self.cross_entropy = ops.get_loss(self.logits, self.y, self.loss_type)
+            self.cross_entropy = ops.get_loss(self.decoder_op, self.x, self.loss_type)
             if self.regularization_type != None:
                 self.cross_entropy = ops.get_regularization(self.cross_entropy, self.regularization_type,
                                                             self.regularization_coefficient)
-            self.prediction = self.logits
+            self.cosine_similarity=distance_metric.cosine_similarity(self.decoder_op,self.x)
+            print(self.cosine_similarity.get_shape().as_list())
+
             tf.summary.scalar("Cross_Entropy", self.cross_entropy)
+            tf.summary.scalar("Accuracy", tf.reduce_mean(self.cosine_similarity))
 
         with tf.name_scope('Optimizer'):
             if self.optimizer==None:
@@ -61,8 +71,11 @@ class model:
         self.session = tf.InteractiveSession()
         return
 
-    def get_model(self,x,is_training):
-        return ops.get_hidden_layer(x,'output_layer',1,'none')
+    def get_encoder(self,x,is_training):
+        return ops.get_n_hidden_layers(x,'encoder',self.encoder_hidden_layers,self.encoder_activation_list,'xavier')
+
+    def get_decoder(self,x,is_training):
+        return ops.get_n_hidden_layers(x,'decoder',self.decoder_hidden_layers+[self.no_of_features],self.decoder_activation_list+['none'],'xavier')
 
 
     def get_paramter_count(self):
@@ -97,6 +110,7 @@ class model:
                 train['x']=train['x'][ind_list]
                 train['y']=train['y'][ind_list]
             epoch_loss = 0
+            sim = []
             i = 0
             batch_iteration = 0
             while i < len(train['x']):
@@ -106,20 +120,23 @@ class model:
                 batch_x = train['x'][start:end]
                 batch_y = train['y'][start:end]
                 if self.working_dir != None:
-                    summary, _, loss= self.session.run([merged, self.optimizer,self.cross_entropy],
-                                                              feed_dict={self.x: batch_x, self.y: batch_y,self.lr:self.learning_rate,self.is_train:True})
+                    summary, _, loss,batch_sim= self.session.run([merged, self.optimizer,self.cross_entropy,self.cosine_similarity],
+                                                              feed_dict={self.x: batch_x,self.lr:self.learning_rate,self.is_train:True})
                 else:
-                    _, loss,= self.session.run([self.optimizer, self.cross_entropy],
-                                                     feed_dict={self.x: batch_x,self.y: batch_y,self.lr: self.learning_rate,self.is_train:True})
+                    _, loss,batch_sim= self.session.run([self.optimizer, self.cross_entropy,self.cosine_similarity],
+                                                     feed_dict={self.x: batch_x,self.lr: self.learning_rate,self.is_train:True})
                 epoch_loss += loss
+                sim+=list(batch_sim)
                 batch_iteration += 1
                 i += self.batch_size
-                print('Training:loss={}\r '.format(round(epoch_loss/batch_iteration,4)),)
+                #print('Training: cosine similarity={} loss={}\r '.format(round(batch_sim,4),round(epoch_loss/batch_iteration,4)),)
+            #sim=np.array(sim).reshape([-1])
             if self.working_dir != None:
                 train_writer.add_summary(summary, epoch)
-            self.train_result.append([epoch, epoch_loss/batch_iteration])
+            self.train_result.append([epoch, epoch_loss/batch_iteration,sum(sim) /len(sim)])
             if val_data != None:
                 epoch_loss = 0
+                sim = []
                 i = 0
                 batch_iteration = 0
                 while i < len(val_data['x']):
@@ -129,18 +146,21 @@ class model:
                     batch_x = val_data['x'][start:end]
                     batch_y = val_data['y'][start:end]
                     if self.working_dir != None:
-                        summary,loss= self.session.run([merged,self.cross_entropy],
-                                                              feed_dict={self.x: batch_x, self.y: batch_y,self.lr:self.learning_rate,self.is_train:False})
+                        summary,loss,batch_sim= self.session.run([merged,self.cross_entropy,self.cosine_similarity],
+                                                              feed_dict={self.x: batch_x,self.lr:self.learning_rate,self.is_train:False})
                     else:
-                        loss= self.session.run([self.cross_entropy],
-                                                     feed_dict={self.x: batch_x,self.y: batch_y,self.lr: self.learning_rate,self.is_train:False})
+                        loss,batch_sim= self.session.run([self.cross_entropy,self.cosine_similarity],
+                                                     feed_dict={self.x: batch_x,self.lr: self.learning_rate,self.is_train:False})
                     epoch_loss += loss
+
+                    sim+=list(batch_sim)
                     batch_iteration += 1
                     i += self.batch_size
-                    print('Validation:loss={}\r '.format(round(epoch_loss / batch_iteration, 4)),)
+                    #print('Validation: Accuracy={} loss={}\r '.format(round(batch_sim, 4),round(epoch_loss / batch_iteration, 4)),)
+                sim=np.array(sim).reshape([-1])
                 if self.working_dir != None:
                     test_writer.add_summary(summary, epoch)
-                self.test_result.append([epoch, epoch_loss/batch_iteration])
+                self.test_result.append([epoch, epoch_loss/batch_iteration, sum(sim) /len(sim)])
 
                 print("Training:", self.train_result[len(self.train_result) - 1], "Val:", self.test_result[len(self.test_result) - 1])
             else:
@@ -159,33 +179,30 @@ class model:
         except:
             return False
 
-    def predict(self,test):
+    def get_encoded_vector(self,test):
         saver = tf.train.Saver()
         saver.restore(self.session, tf.train.latest_checkpoint(self.working_dir+'/model/'))
         print ('Retored model',ops.look_for_last_checkpoint(self.working_dir + "/model/"))
         merged = tf.summary.merge_all()
-        if 'x' in test and test['x'].shape[0] > 0:
+        if test.shape[0] > 0:
             i = 0
             iteration = 0
-            test_prediction=[]
-            j=0
-            while i < len(test['x']):
+            sim = []
+            encoded_data=[]
+            loss=0
+            while i < len(test):
                 start = i
                 end = i + self.batch_size
-                if (end > len(test['x'])): end = len(test['x'])
-                batch_x = test['x'][start:end]
-                if 'y' in test and test['y'].shape[0] > 0:
-                    batch_y = test['y'][start:end]
-                    pred= self.session.run([self.prediction], feed_dict={self.x: batch_x, self.y: batch_y,self.is_train:False})
-                else:
-                    pred= self.session.run([self.prediction], feed_dict={self.x: batch_x,self.is_train:False})
+                if (end > len(test)): end = len(test)
+                batch_x = test[start:end]
+                batch_encoded_data,batch_loss,batch_sim= self.session.run([self.encoder_op,self.cross_entropy,self.cosine_similarity], feed_dict={self.x: batch_x,self.is_train:False})
                 iteration += 1
                 i += self.batch_size
-                if isinstance(pred,list):
-                    test_prediction+=pred[0].tolist()
-                else:
-                    test_prediction += pred.tolist()
-            if 'y' in test and test['y'].shape[0] > 0:
-                return np.array(test_prediction)
-            else:
-                return np.array(test_prediction)
+
+                sim+=list(batch_sim)
+                loss+=batch_loss
+                encoded_data.append(batch_encoded_data)
+
+
+            encoded_data=np.concatenate(encoded_data,axis=0)
+            return {'vectors':encoded_data,'loss':loss,'similiarity':sim}

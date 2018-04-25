@@ -5,7 +5,7 @@ import ops
 import heapq
 lower = str.lower
 class model:
-    no_of_features=None
+    no_of_features = None
     learning_rate = 0.001
     model_restore = False
     working_dir = None
@@ -14,12 +14,10 @@ class model:
     test_result = []
     train_result = []
 
-    activation_list=[]
-    hidden_layers=[]
-
+    no_of_classes = None
     dropout_rate=0.5
 
-    loss_type = 'mse'
+    loss_type = 'softmax'
     regularization_type = None
     regularization_coefficient = 0.0001
     logits=None
@@ -31,9 +29,9 @@ class model:
     def setup(self):
         tf.reset_default_graph()
         self.x = tf.placeholder(dtype=tf.float32,
-                                shape=[None,self.no_of_features],
+                                shape=[None, self.no_of_features],
                                 name="input")
-        self.y = tf.placeholder(dtype=tf.float32, shape=[None, 1], name="labels")
+        self.y = tf.placeholder(dtype=tf.float32, shape=[None, self.no_of_classes], name="labels")
         self.lr = tf.placeholder("float", shape=[])
         self.is_train = tf.placeholder(tf.bool, shape=[])
 
@@ -46,8 +44,12 @@ class model:
             if self.regularization_type != None:
                 self.cross_entropy = ops.get_regularization(self.cross_entropy, self.regularization_type,
                                                             self.regularization_coefficient)
-            self.prediction = self.logits
+            self.probability = tf.nn.softmax(self.logits, name="softmax")
+            self.prediction = tf.argmax(self.probability, 1, name='Prediction')
+            correct_prediction = tf.equal(self.prediction, tf.argmax(self.y, 1), name='Correct_prediction')
+            self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32), name='Accuracy')
             tf.summary.scalar("Cross_Entropy", self.cross_entropy)
+            tf.summary.scalar("Accuracy", self.accuracy)
 
         with tf.name_scope('Optimizer'):
             if self.optimizer==None:
@@ -62,7 +64,9 @@ class model:
         return
 
     def get_model(self,x,is_training):
-        return ops.get_hidden_layer(x,'output_layer',1,'none')
+        weight=ops.get_variable('weight',[self.no_of_features,self.no_of_classes],'xavier')
+        bais=ops.get_variable('bais', [self.no_of_classes], 'xavier')
+        return tf.add(tf.matmul(x,weight),bais)
 
 
     def get_paramter_count(self):
@@ -97,6 +101,7 @@ class model:
                 train['x']=train['x'][ind_list]
                 train['y']=train['y'][ind_list]
             epoch_loss = 0
+            acc = 0
             i = 0
             batch_iteration = 0
             while i < len(train['x']):
@@ -106,20 +111,22 @@ class model:
                 batch_x = train['x'][start:end]
                 batch_y = train['y'][start:end]
                 if self.working_dir != None:
-                    summary, _, loss= self.session.run([merged, self.optimizer,self.cross_entropy],
+                    summary, _, loss,batch_acc= self.session.run([merged, self.optimizer,self.cross_entropy,self.accuracy],
                                                               feed_dict={self.x: batch_x, self.y: batch_y,self.lr:self.learning_rate,self.is_train:True})
                 else:
-                    _, loss,= self.session.run([self.optimizer, self.cross_entropy],
+                    _, loss,batch_acc= self.session.run([self.optimizer, self.cross_entropy,self.accuracy],
                                                      feed_dict={self.x: batch_x,self.y: batch_y,self.lr: self.learning_rate,self.is_train:True})
                 epoch_loss += loss
+                acc += batch_acc
                 batch_iteration += 1
                 i += self.batch_size
-                print('Training:loss={}\r '.format(round(epoch_loss/batch_iteration,4)),)
+                print('Training: Accuracy={} loss={}\r '.format(round(batch_acc,4),round(epoch_loss/batch_iteration,4)),)
             if self.working_dir != None:
                 train_writer.add_summary(summary, epoch)
-            self.train_result.append([epoch, epoch_loss/batch_iteration])
+            self.train_result.append([epoch, epoch_loss/batch_iteration, acc / batch_iteration])
             if val_data != None:
                 epoch_loss = 0
+                acc = 0
                 i = 0
                 batch_iteration = 0
                 while i < len(val_data['x']):
@@ -129,18 +136,20 @@ class model:
                     batch_x = val_data['x'][start:end]
                     batch_y = val_data['y'][start:end]
                     if self.working_dir != None:
-                        summary,loss= self.session.run([merged,self.cross_entropy],
+                        summary,loss,batch_acc= self.session.run([merged,self.cross_entropy,self.accuracy],
                                                               feed_dict={self.x: batch_x, self.y: batch_y,self.lr:self.learning_rate,self.is_train:False})
                     else:
-                        loss= self.session.run([self.cross_entropy],
+                        loss,batch_acc= self.session.run([self.cross_entropy,self.accuracy],
                                                      feed_dict={self.x: batch_x,self.y: batch_y,self.lr: self.learning_rate,self.is_train:False})
                     epoch_loss += loss
+
+                    acc += batch_acc
                     batch_iteration += 1
                     i += self.batch_size
-                    print('Validation:loss={}\r '.format(round(epoch_loss / batch_iteration, 4)),)
+                    print('Validation: Accuracy={} loss={}\r '.format(round(batch_acc, 4),round(epoch_loss / batch_iteration, 4)),)
                 if self.working_dir != None:
                     test_writer.add_summary(summary, epoch)
-                self.test_result.append([epoch, epoch_loss/batch_iteration])
+                self.test_result.append([epoch, epoch_loss/batch_iteration, acc / batch_iteration])
 
                 print("Training:", self.train_result[len(self.train_result) - 1], "Val:", self.test_result[len(self.test_result) - 1])
             else:
@@ -167,6 +176,7 @@ class model:
         if 'x' in test and test['x'].shape[0] > 0:
             i = 0
             iteration = 0
+            acc = 0
             test_prediction=[]
             j=0
             while i < len(test['x']):
@@ -176,7 +186,8 @@ class model:
                 batch_x = test['x'][start:end]
                 if 'y' in test and test['y'].shape[0] > 0:
                     batch_y = test['y'][start:end]
-                    pred= self.session.run([self.prediction], feed_dict={self.x: batch_x, self.y: batch_y,self.is_train:False})
+                    pred,batch_acc = self.session.run([self.prediction,self.accuracy], feed_dict={self.x: batch_x, self.y: batch_y,self.is_train:False})
+                    acc += batch_acc
                 else:
                     pred= self.session.run([self.prediction], feed_dict={self.x: batch_x,self.is_train:False})
                 iteration += 1
@@ -186,6 +197,6 @@ class model:
                 else:
                     test_prediction += pred.tolist()
             if 'y' in test and test['y'].shape[0] > 0:
-                return np.array(test_prediction)
+                return np.array(test_prediction), acc/iteration
             else:
                 return np.array(test_prediction)

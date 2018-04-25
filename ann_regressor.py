@@ -2,7 +2,6 @@ import tensorflow as tf
 import numpy as np
 import random
 import ops
-import heapq
 lower = str.lower
 class model:
     no_of_features=None
@@ -62,7 +61,8 @@ class model:
         return
 
     def get_model(self,x,is_training):
-        return ops.get_hidden_layer(x,'output_layer',1,'none')
+        op=ops.get_n_hidden_layers(x,'',self.hidden_layers,self.activation_list)
+        return ops.get_hidden_layer(op,'output_layer',1,'none')
 
 
     def get_paramter_count(self):
